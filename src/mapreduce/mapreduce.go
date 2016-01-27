@@ -68,6 +68,9 @@ type MapReduce struct {
 	mu sync.Mutex
 
 	aWorkers []*WorkerInfo // available workers
+
+	jobs     *JobStack
+	doneJobs int
 }
 
 func InitMapReduce(nmap int, nreduce int,
@@ -84,6 +87,7 @@ func InitMapReduce(nmap int, nreduce int,
 	// initialize any additional state here
 	mr.Workers = make(map[string]*WorkerInfo)
 	mr.aWorkers = make([]*WorkerInfo, 0)
+	mr.jobs = InitJobStack(mr.nMap)
 
 	return mr
 }

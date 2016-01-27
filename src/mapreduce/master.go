@@ -2,8 +2,8 @@ package mapreduce
 
 import "container/list"
 import "fmt"
-import "time"
 import "log"
+import "sync"
 
 type WorkerInfo struct {
 	address string
@@ -35,47 +35,53 @@ func (mr *MapReduce) RunMaster() *list.List {
 	var (
 		mreply chan DoJobReply = make(chan DoJobReply, mr.nMap)
 		rreply chan DoJobReply = make(chan DoJobReply, mr.nReduce)
-		mJob   int             = 0
-		rJob   int             = 0
 	)
 	// map
-	for mJob < mr.nMap {
-		Worker := mr.GetAvailableWoker()
-		if Worker == nil {
-			time.Sleep(time.Microsecond * 100)
-		} else {
-			go mr.job(Worker.address, mJob, Map, mreply)
-			mJob += 1
+	for mr.jobs.Length() > 0 {
+		var worker *WorkerInfo
+		for worker == nil {
+			worker = mr.GetAvailableWoker()
+		}
+		if mJob, ok := mr.jobs.Pop(); ok {
+			go mr.job(worker.address, mJob, Map, mreply)
 		}
 	}
 
 	// waiting for all map jobs done
-	for i := 0; i < mr.nMap; i++ {
+	for mr.doneJobs < mr.nMap {
 		r := <-mreply
-		log.Printf("DoMap Done: %t\n", r.OK)
+		if r.OK {
+			log.Printf("DoMap Done: %t\n", r.OK)
+		}
 	}
 
 	// reduce
-	for rJob < mr.nReduce {
-		Worker := mr.GetAvailableWoker()
-		if Worker == nil {
-			time.Sleep(time.Microsecond * 100)
-		} else {
-			go mr.job(Worker.address, rJob, Reduce, rreply)
-			rJob += 1
+	mr.doneJobs = 0
+	mr.jobs = InitJobStack(mr.nReduce)
+	for mr.jobs.Length() > 0 {
+		var worker *WorkerInfo
+		for worker == nil {
+			worker = mr.GetAvailableWoker()
+		}
+		if rJob, ok := mr.jobs.Pop(); ok {
+			go mr.job(worker.address, rJob, Reduce, rreply)
 		}
 	}
 
 	// waiting for all reduce jobs done
-	for i := 0; i < mr.nReduce; i++ {
+	for mr.doneJobs < mr.nReduce {
 		r := <-rreply
-		log.Printf("DoReduce Done: %t", r.OK)
+		if r.OK {
+			log.Printf("DoReduce Done: %t", r.OK)
+		}
 	}
 
 	return mr.KillWorkers()
 }
 
 func (mr *MapReduce) job(address string, jobNumber int, operation JobType, resp chan DoJobReply) {
+	var reply DoJobReply
+
 	args := &DoJobArgs{
 		File:      mr.file,
 		JobNumber: jobNumber,
@@ -86,11 +92,20 @@ func (mr *MapReduce) job(address string, jobNumber int, operation JobType, resp 
 	} else {
 		args.NumOtherPhase = mr.nMap
 	}
-	var reply DoJobReply
 	//	fmt.Printf("Before call:%s,%#v\n", worker.address, *args)
 	if ok := call(address, "Worker.DoJob", args, &reply); ok {
 		fmt.Printf("DoWork: RPC %s %s result: %t\n", address, args.Operation, reply.OK)
 		mr.SetAvailableWoker(address)
+		if reply.OK == false {
+			log.Printf("DoWork failed: %d\n", jobNumber)
+		} else {
+			mr.doneJobs += 1
+		}
+	}
+
+	// redo when job failed
+	if reply.OK == false {
+		mr.jobs.Push(jobNumber)
 	}
 
 	resp <- reply
@@ -137,4 +152,47 @@ func (mr *MapReduce) GetAvailableWoker() *WorkerInfo {
 	} else {
 		return nil
 	}
+}
+
+type JobStack struct {
+	data []int
+	mu   sync.Mutex
+}
+
+func (jq *JobStack) Push(elem int) {
+	jq.mu.Lock()
+	defer jq.mu.Unlock()
+
+	jq.data = append(jq.data, elem)
+}
+
+func (jq *JobStack) Pop() (elem int, ok bool) {
+	length := jq.Length()
+	if length <= 0 {
+		return
+	}
+
+	jq.mu.Lock()
+	defer jq.mu.Unlock()
+
+	elem = jq.data[length-1]
+	jq.data = jq.data[:length-1]
+	ok = true
+
+	return
+}
+
+func (jq *JobStack) Length() int {
+	return len(jq.data)
+}
+
+func InitJobStack(n int) *JobStack {
+	jq := &JobStack{
+		data: make([]int, n),
+	}
+	for i := 0; i < n; i++ {
+		jq.Push(i)
+	}
+
+	return jq
 }
